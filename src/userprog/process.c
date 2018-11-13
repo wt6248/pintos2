@@ -21,6 +21,15 @@
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
+struct argument_node {
+	char *argument;
+	struct argument_node *head;
+};
+
+static struct argument_node *argument_tail;
+static struct argument_node *argu_addr_tail;
+static char *save_ptr;
+
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
@@ -30,16 +39,22 @@ process_execute (const char *file_name)
 {
   char *fn_copy;
   tid_t tid;
+  char *token;
+  char *save_ptrt;
+
+  /* get a file name */
+  token = strtok_r(file_name, " ", &save_ptrt);
+  save_ptr = save_ptrt;
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (fn_copy, token, PGSIZE);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (token, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
   return tid;
@@ -53,6 +68,12 @@ start_process (void *file_name_)
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
+  char *token;
+  int number_argument = 0;
+  int size_argument = 0;
+  int i=0;
+  char** temp_addr;
+  struct argument_node *temp_node;
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -61,11 +82,68 @@ start_process (void *file_name_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
+  
+
   /* If load failed, quit. */
   palloc_free_page (file_name);
   if (!success) 
     thread_exit ();
 
+/* initialize nodes*/
+  argument_tail = NULL;
+  argu_addr_tail = NULL;
+  
+  for(token = strtok_r(NULL, " ", &save_ptr) ;
+		  token != null ; 
+		  token = strtok_r(NULL, " ", &save_ptr)) 
+  {
+  	temp_node = malloc( sizeof (struct argument_node) );
+	temp_node->tail = argument_tail;
+	strlcpy(temp_node->argument, token, PGSIZE);
+	argument_tail = temp_node;
+
+	number_argument++;
+	size_argument += sizeof(token);
+  }
+  
+  if(number_argument != 0) {
+    while(argument_tail != NULL)
+    {
+ 	(char*)if_.esp -= sizeof(argument_tail->argument);
+        strlcpy((char*)if_.esp,	argument_tail->argument, PGSIZE);
+	temp_node = argument_tail;
+	argument_tail = argument_tail->head;
+	palloc_free_page(temp_node);
+	temp_node = malloc( sizeof (struct argument_node) );
+	temp_node->tail = argu_addr_tail;
+	temp_node->argument = (char*)if_.esp;
+	argu_addr_tail = temp_node;
+    }
+    for(i = size_argument % 4 ; i>0;i--)
+    {
+    	(uint8_t*)if_.esp --;
+	*(uint8_t*)if_.esp = 0;
+    }	
+  (char*)if_.esp--;
+  (char*)if_.esp = NULL;
+
+  while(argu_addr_tail != NULL)
+  {
+    (char*)if_.esp--;
+    if_.esp = argu_addr_tail->argument;
+    temp_node = argu_addr_tail;
+    argu_addr_tail = argu_addr_tail->head;
+    palloc_free_page(temp_node);
+  }
+  temp_addr = &((char*)if_.esp);
+  (char**)if_.esp--;
+  (char**)if_.esp = temp_addr;
+  }
+  (int*)if_.esp--;
+  *(int*)if_.esp = number_argument;
+  if_.esp--;
+  if_.esp = NULL;
+  
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
